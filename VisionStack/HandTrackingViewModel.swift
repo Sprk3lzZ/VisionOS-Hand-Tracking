@@ -20,6 +20,7 @@ struct CubeMarkerComponent: Component {}
 
     private var contentEntity = Entity()
     private var meshEntities = [UUID : ModelEntity]()
+    private var particlesEntity: Entity?
 
     // MARK: - Data model Main -> Finger -> Points
     enum Finger: CaseIterable {
@@ -112,7 +113,7 @@ struct CubeMarkerComponent: Component {}
     // MARK: - Setup
 
     func setupContentEntity() -> Entity {
-        // Helper pour créer une sphère d’articulation colorée
+        // Helper pour créer une sphère d'articulation invisible
         func createJointSphere(color: UIColor, radius: Float = 0.01) -> ModelEntity {
             let entity = ModelEntity(
                 mesh: .generateSphere(radius: radius),
@@ -121,7 +122,7 @@ struct CubeMarkerComponent: Component {}
                 mass: 0.0
             )
             entity.components.set(PhysicsBodyComponent(mode: .kinematic))
-            entity.components.set(OpacityComponent(opacity: 1.0))
+            entity.components.set(OpacityComponent(opacity: 0.0)) // Rendre invisible
             return entity
         }
 
@@ -165,6 +166,9 @@ struct CubeMarkerComponent: Component {}
         // Créer les deux mains: gauche rouge, droite bleu
         leftHand = makeHand(chirality: .left, color: UIColor(red: 1, green: 0.2745098174, blue: 0.4941176471, alpha: 1))
         rightHand = makeHand(chirality: .right, color: UIColor(red: 0.2352941176, green: 0.6745098062, blue: 1, alpha: 1))
+
+        // Créer le système de particules
+        setupParticlesSystem()
 
         return contentEntity
     }
@@ -225,6 +229,9 @@ struct CubeMarkerComponent: Component {}
             }
             // Une fois les mains mises à jour, vérifier l'interaction doigt→cube
             self.detectTouchAndChangeColor()
+            
+            // Vérifier le geste triangulaire
+            self.detectTriangleGesture()
         }
     }
 
@@ -315,5 +322,191 @@ struct CubeMarkerComponent: Component {}
                 cube.model?.materials = [SimpleMaterial(color: randomColor, isMetallic: false)]
             }
         }
+    }
+    
+    // MARK: - Particles System
+    
+    func setupParticlesSystem() {
+        // Créer une entité pour les particules
+        particlesEntity = Entity()
+        particlesEntity?.name = "Particles"
+        contentEntity.addChild(particlesEntity!)
+    }
+    
+    func createFireball(from position: SIMD3<Float>, direction: SIMD3<Float>) {
+        guard let particlesEntity = particlesEntity else { return }
+        
+        // Créer la boule de feu principale
+        let fireball = ModelEntity(
+            mesh: .generateSphere(radius: 0.08),
+            materials: [UnlitMaterial(color: UIColor(
+                red: 1.0,
+                green: 0.3,
+                blue: 0.0,
+                alpha: 0.9
+            ))],
+            collisionShape: .generateSphere(radius: 0.08),
+            mass: 0.5
+        )
+        
+        fireball.setPosition(position, relativeTo: nil)
+        
+        // Ajouter un effet de lueur avec une sphère plus grande et transparente
+        let glow = ModelEntity(
+            mesh: .generateSphere(radius: 0.12),
+            materials: [UnlitMaterial(color: UIColor(
+                red: 1.0,
+                green: 0.6,
+                blue: 0.0,
+                alpha: 0.3
+            ))]
+        )
+        fireball.addChild(glow)
+        
+        // Physique pour la boule de feu
+        let material = PhysicsMaterialResource.generate(friction: 0.1, restitution: 0.2)
+        fireball.components.set(PhysicsBodyComponent(
+            shapes: fireball.collision!.shapes,
+            mass: 0.5,
+            material: material,
+            mode: .dynamic
+        ))
+        
+        particlesEntity.addChild(fireball)
+        
+        // Définir une vitesse initiale (équivalent à une impulsion)
+        let velocity = direction * 15.0
+        fireball.components.set(PhysicsMotionComponent(linearVelocity: velocity))
+        
+        // Créer des particules de feu qui suivent la boule
+        createFireTrail(fireball: fireball)
+        
+        // Supprimer la boule de feu après 4 secondes
+        Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            fireball.removeFromParent()
+        }
+    }
+    
+    func createFireTrail(fireball: ModelEntity) {
+        // Créer des particules de feu qui suivent la boule
+        for i in 0..<8 {
+            let trailParticle = ModelEntity(
+                mesh: .generateSphere(radius: 0.02),
+                materials: [UnlitMaterial(color: UIColor(
+                    red: CGFloat.random(in: 0.8...1.0),
+                    green: CGFloat.random(in: 0.2...0.6),
+                    blue: 0.0,
+                    alpha: 0.7
+                ))]
+            )
+            
+            // Position aléatoire derrière la boule
+            let randomOffset = SIMD3<Float>(
+                Float.random(in: -0.05...0.05),
+                Float.random(in: -0.05...0.05),
+                Float.random(in: -0.1...0.0)
+            )
+            trailParticle.setPosition(randomOffset, relativeTo: fireball)
+            
+            fireball.addChild(trailParticle)
+            
+            // Animation de disparition progressive
+            Task {
+                for alpha in stride(from: 0.7, through: 0.0, by: -0.1) {
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconde
+                    trailParticle.model?.materials = [UnlitMaterial(color: UIColor(
+                        red: CGFloat.random(in: 0.8...1.0),
+                        green: CGFloat.random(in: 0.2...0.6),
+                        blue: 0.0,
+                        alpha: alpha
+                    ))]
+                }
+                trailParticle.removeFromParent()
+            }
+        }
+    }
+    
+    // MARK: - Triangle Gesture Detection
+    
+    func detectTriangleGesture() {
+        // Vérifier que les deux mains sont disponibles
+        guard let leftHand = leftHand,
+              let rightHand = rightHand else { return }
+        
+        // Récupérer les positions des 4 doigts : 2 index + 2 pouces
+        guard let leftIndexTip = leftHand.fingers[.index]?.points[.tip]?.transform.translation,
+              let leftThumbTip = leftHand.fingers[.thumb]?.points[.tip]?.transform.translation,
+              let rightIndexTip = rightHand.fingers[.index]?.points[.tip]?.transform.translation,
+              let rightThumbTip = rightHand.fingers[.thumb]?.points[.tip]?.transform.translation else { return }
+        
+        // Calculer les distances entre les doigts
+        let distanceLeftIndexRightIndex = distance(leftIndexTip, rightIndexTip)
+        let distanceLeftIndexLeftThumb = distance(leftIndexTip, leftThumbTip)
+        let distanceLeftIndexRightThumb = distance(leftIndexTip, rightThumbTip)
+        let distanceRightIndexLeftThumb = distance(rightIndexTip, leftThumbTip)
+        let distanceRightIndexRightThumb = distance(rightIndexTip, rightThumbTip)
+        let distanceLeftThumbRightThumb = distance(leftThumbTip, rightThumbTip)
+        
+        // Seuils pour détecter un triangle (ajustez selon vos besoins)
+        let maxDistance = Float(0.01) // 15cm maximum entre les doigts
+        let minDistance = Float(0.005) // 5cm minimum entre les doigts
+        
+        // Vérifier si les 4 points forment approximativement un triangle
+        // (les index sont proches, les pouces sont proches, et il y a une certaine distance entre les groupes)
+        let indexClose = distanceLeftIndexRightIndex < maxDistance
+        let thumbsClose = distanceLeftThumbRightThumb < maxDistance
+        let indexThumbDistance = (distanceLeftIndexLeftThumb + distanceLeftIndexRightThumb + 
+                                 distanceRightIndexLeftThumb + distanceRightIndexRightThumb) / 4
+        
+        // Le geste est détecté si les index sont proches, les pouces sont proches,
+        // et il y a une distance raisonnable entre les deux groupes
+        if indexClose && thumbsClose && indexThumbDistance > minDistance && indexThumbDistance > maxDistance * 10 {
+            // Calculer le centre du triangle formé par les 4 points
+            let center = (leftIndexTip + leftThumbTip + rightIndexTip + rightThumbTip) / 4
+            
+            // Calculer la direction où le triangle pointe
+            // Utiliser la normale du plan formé par les 4 points
+            let direction = calculateTriangleDirection(
+                leftIndex: leftIndexTip,
+                leftThumb: leftThumbTip,
+                rightIndex: rightIndexTip,
+                rightThumb: rightThumbTip
+            )
+            
+            // Créer la boule de feu qui part du triangle
+            createFireball(from: center, direction: direction)
+        }
+    }
+    
+    // Fonction utilitaire pour calculer la distance entre deux points
+    private func distance(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> Float {
+        let diff = a - b
+        return sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z)
+    }
+    
+    // Calculer la direction où le triangle pointe
+    private func calculateTriangleDirection(
+        leftIndex: SIMD3<Float>,
+        leftThumb: SIMD3<Float>,
+        rightIndex: SIMD3<Float>,
+        rightThumb: SIMD3<Float>
+    ) -> SIMD3<Float> {
+        // Calculer la normale du plan formé par les 4 points
+        // Utiliser deux vecteurs du plan pour calculer la normale
+        let vector1 = rightIndex - leftIndex
+        let vector2 = leftThumb - leftIndex
+        
+        // Produit vectoriel pour obtenir la normale
+        let normal = cross(vector1, vector2)
+        
+        // Normaliser le vecteur
+        let length = sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z)
+        if length > 0 {
+            return normal / length
+        }
+        
+        // Si la normale est nulle, utiliser une direction par défaut (vers l'avant)
+        return SIMD3<Float>(0, 0, -1)
     }
 }

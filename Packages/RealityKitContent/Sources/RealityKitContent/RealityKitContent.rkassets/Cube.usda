@@ -18,7 +18,7 @@ def Xform "Root"
         rel material:binding = </Root/Cube/DefaultMaterial>
         double size = 0.02
         quatf xformOp:orient = (1, 0, 0, 0)
-        float3 xformOp:scale = (0.2, 0.2, 0.2)
+        float3 xformOp:scale = (0.5, 0.5, 0.5)
         float3 xformOp:translate = (0, 0, 0)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
 
